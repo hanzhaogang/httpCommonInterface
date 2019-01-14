@@ -1,0 +1,234 @@
+package com.example.demo;
+
+import java.io.File;
+import java.io.IOException;
+import java.io.InputStream;
+import java.io.StringReader;
+import java.nio.file.Files;
+import java.nio.file.StandardCopyOption;
+import java.util.ArrayList;
+import java.util.List;
+
+import javax.servlet.ServletContext;
+import javax.servlet.ServletException;
+import javax.servlet.http.Part;
+
+import org.apache.catalina.servlet4preview.http.HttpServletRequest;
+import org.apache.commons.io.IOUtils;
+import org.springframework.web.bind.annotation.PostMapping;
+import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.RequestMethod;
+import org.springframework.web.bind.annotation.RestController;
+import org.springframework.web.context.ServletContextAware;
+
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.ObjectWriter;
+import com.geiri.predictClient.PredictClient;
+
+import predictMessage.Message.detection;
+import predictMessage.Message.response;
+
+@RestController
+public class SampleController implements ServletContextAware{
+	private ServletContext context;
+	private int maxSize = 102400 * 1024;// 102400KB以内(100MB)
+
+	@Override
+	public void setServletContext(ServletContext servletContext) {
+		// TODO Auto-generated method stub
+	    this.context = servletContext;
+	}
+	
+    @RequestMapping("/")
+    String home() {
+        return "Hello This is the AI object detection service !";
+    }
+
+    /*
+     * 1 receive the file and save it into the file system.
+     * 2 response to the request.
+     */
+    @PostMapping(value="/jixie")
+    String fileUpload(HttpServletRequest request) {
+    	class Results{
+    		public String id;
+    		public int code;
+    		public String message;
+    		public String ip;
+    		public String company;
+    		public int port;
+    		public List<Target> targets;
+    	} 	
+    	class Request{
+    		public String company;
+    		public String ip;
+    		public int port;
+    		public String id;
+    		public String fileName;
+    		public long timeStamp;
+    		public int fileSize;
+    		public int type;
+    	}
+    	
+    	String[] objectNames=new String[] {
+				"tower_crane_arm",
+				"truck_crane",
+				"truck_crane_working_arm",
+				"truck_crane",
+				"truck_crane_working_arm",
+				"truck_crane_working_arm",
+				"cement_pump_truck",
+				"cement_pump_truck",
+				"excavator",
+				"none",
+				"bulldozer",
+				"excavator"};
+    	
+    	
+    	System.out.println("entering the fileUpload method.");
+    	//MultipartHttpServletRequest multipartRequest = (MultipartHttpServletRequest) request;
+        //MultipartFile file = multipartRequest.getFile("file");
+        
+        File uploadPath = new File("/home/share/matlab/MPSInstances/noHelmetPersonDetector/Step0_MyTestImages/");
+        if (!uploadPath.exists()) {
+        	uploadPath.mkdirs();
+        }
+        
+        Results res=new Results();
+    	
+        try  {
+        	Part jsonPart=request.getPart("FileUpload");
+        	InputStream input2 = jsonPart.getInputStream();
+        	String jsonString = IOUtils.toString(input2, "utf-8"); 
+        	//{"filename":"869721020145075_20170907071152.jpg",
+        	//"filesize":1,
+        	//"id":"869721020145075_20170907071152",
+        	//"ip":"127.0.0.1",
+        	//"port":0,
+        	//"timestamp":1541651386}
+			input2.close();
+			JsonNode rootNode = new ObjectMapper().readTree(new StringReader(jsonString));
+			JsonNode companyFeild=rootNode.get("company");
+			JsonNode ipFeild=rootNode.get("ip");
+			JsonNode idFeild=rootNode.get("id");
+			
+			res.id=idFeild.asText();
+			res.code=0;
+	    	res.message="";
+	    	res.company=companyFeild.asText();
+	    	res.ip=ipFeild.asText();
+	    	res.port=65535;
+	    	
+            //jsonPart.getH
+        	Part filePart=request.getPart("file");
+        	File file = new File(uploadPath, "input.jpg");
+        	InputStream input = filePart.getInputStream();
+        	Files.copy(input, file.toPath(),StandardCopyOption.REPLACE_EXISTING);
+        	System.out.println("upload file saved in the file system");
+			input.close();
+			
+			
+			PredictClient predictClient=new PredictClient("127.0.0.1", 6379, 10000);
+			response resp=predictClient.sendRequest("jixie12",
+					new File("/home/share/matlab/MPSInstances/noHelmetPersonDetector/Step0_MyTestImages/input.jpg"),
+							0.5);
+			while(resp.getStatus()!=0) {
+				System.out.println("server return error!");
+				resp=predictClient.sendRequest("jixie12",
+					new File("/home/share/matlab/MPSInstances/noHelmetPersonDetector/Step0_MyTestImages/input.jpg"),
+						0.5);
+			}
+			List<detection> detections=resp.getDetsList();
+			List<Target> targets=new ArrayList<>();
+			for(detection det:detections) {
+				int[] coord=getCoord(resp,det);
+				
+				Target tar=new Target();
+				tar.objectType=det.getCls();
+				tar.x=coord[0];
+				tar.y=coord[1];
+				tar.h=coord[2];
+				tar.w=coord[3];
+				targets.add(tar);
+			}
+			res.targets=targets;
+        } catch (IOException | ServletException | IllegalArgumentException | 
+        		IllegalAccessException e) {
+			// TODO Auto-generated catch block
+			e.printStackTrace();
+        }
+
+        
+        return JsonUtil.toJson(res);
+    }
+    
+    
+    
+    private static int[] getCoord(response res,detection det){
+		
+		int imgWidth=res.getWidth();
+		int imgHeight=res.getHeight();
+		
+		double xcPrecent=det.getXc();
+		double ycPrecent=det.getYc();
+		double rectWPrecent=det.getW();
+		double rectHPrecent=det.getH();
+		
+		int xc=(int)(imgWidth*xcPrecent);
+		int yc=(int)(imgHeight*ycPrecent);
+
+		int rectWidth=(int)(imgWidth*rectWPrecent);
+		int rectHeight=(int)(imgHeight*rectHPrecent);
+		int rectLeftTopX=xc-rectWidth/2;
+		int rectLeftTopY=yc-rectHeight/2;
+		
+		int[] coord=new int[4];
+		coord[0]=rectLeftTopX;
+		coord[1]=rectLeftTopY;
+		coord[2]=rectWidth;
+		coord[3]=rectHeight;
+		return coord;
+	}
+}
+
+
+class PhotoIds{
+	public List<String> photoIds;
+}
+
+
+class Photo{
+	public String id;
+	public String ip;
+	public String company;
+	public int port;
+	public List<Target>results;
+	//public int stamp;
+	//public int timestamp;
+	//public String url;
+}
+
+class Target{
+	public int h;
+	public int w;
+	public int x;
+	public int y;
+	public String objectType;
+}
+
+class JsonUtil{
+	public static String toJson(Object obj) {
+		ObjectWriter ow = new ObjectMapper().writer().withDefaultPrettyPrinter();
+    	String json="";
+    	try {
+			json = ow.writeValueAsString(obj);
+		} catch (JsonProcessingException e) {
+			// TODO Auto-generated catch block
+			e.printStackTrace();
+		}
+    	return json;    
+	}
+}
+
